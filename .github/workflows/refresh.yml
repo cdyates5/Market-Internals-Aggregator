@@ -1,0 +1,80 @@
+name: Refresh Market Internals Aggregator
+
+on:
+  schedule:
+    # 22:40 UTC Mon-Fri: after the US close has settled on Yahoo.
+    # That is about 9:40am the next morning in Melbourne (8:40am during southern winter).
+    - cron: "40 22 * * 1-5"
+  workflow_dispatch:          # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two runs publish at once; let a manual run finish rather than cancelling it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Carries the downloaded series between runs. It is only a speed-up and a
+      # fallback: if the cache is missing the run just downloads everything again.
+      - name: Restore series cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache
+          key: series-${{ github.run_id }}
+          restore-keys: |
+            series-
+
+      - name: Build the dashboard
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          if [ -z "$FRED_API_KEY" ]; then
+            echo "::error::FRED_API_KEY is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          mkdir -p site
+          python3 rebuild.py --out site/index.html --cache cache --refetch
+
+      # Saved even if a later step fails, so a partial download is still reusable.
+      - name: Save series cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: cache
+          key: series-${{ github.run_id }}
+
+      - name: Check the build before publishing
+        run: python3 check.py site/index.html | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
